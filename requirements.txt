@@ -3,6 +3,4 @@ uvicorn
 transformers
 langchain
 sentence-transformers
-pdf2image
-pytesseract
 torch
