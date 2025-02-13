@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from langchain_community.document_loaders import PyPDFLoader
@@ -8,6 +8,7 @@ from langchain_community.llms import HuggingFacePipeline
 from langchain.chains import RetrievalQA
 import os
 import torch
+from typing import List
 
 # Initialize FastAPI
 app = FastAPI()
@@ -16,29 +17,18 @@ app = FastAPI()
 model_name = "deepseek-ai/deepseek-coder-1.3b-instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# Load model with low CPU memory usage (requires accelerate library)
+# Load model with low CPU memory usage
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype=torch.float16 if torch.cuda.is_available() else None,
     device_map="auto" if torch.cuda.is_available() else None,
 )
 
-# Load PDFs from Google Drive (if running locally)
-pdf_folder = "/content/drive/MyDrive/NCTB_PDFs"  # Update this path if needed
-all_pdfs = [os.path.join(pdf_folder, f) for f in os.listdir(pdf_folder) if f.endswith(".pdf")]
-
-# Load and process actual PDF text content
-pdf_texts = []
-for pdf in all_pdfs:
-    pdf_loader = PyPDFLoader(pdf)
-    documents = pdf_loader.load()
-    pdf_texts.extend([doc.page_content for doc in documents])
-
 # Initialize HuggingFaceEmbeddings with an explicit model
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Create FAISS index with actual PDF text
-vector_db = FAISS.from_texts(pdf_texts, embedding_model)
+# Create FAISS index (initially empty)
+vector_db = FAISS.from_texts([""], embedding_model)
 
 # Create LLM chain
 pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, max_length=512)
@@ -56,8 +46,32 @@ kona_qa = RetrievalQA.from_chain_type(
 class QuestionRequest(BaseModel):
     question: str
 
-# API endpoint
-@app.post("/ask")
+# API endpoint to upload PDFs
+@app.post("/upload-pdf/")
+async def upload_pdf(file: UploadFile = File(...)):
+    try:
+        # Save the uploaded file temporarily
+        file_path = f"temp_{file.filename}"
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        # Load and process the PDF
+        pdf_loader = PyPDFLoader(file_path)
+        documents = pdf_loader.load()
+        texts = [doc.page_content for doc in documents]
+
+        # Add the text to the FAISS index
+        vector_db.add_texts(texts)
+
+        # Clean up the temporary file
+        os.remove(file_path)
+
+        return {"message": f"PDF processed! {len(texts)} pages added."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# API endpoint to ask questions
+@app.post("/ask/")
 def ask_question(request: QuestionRequest):
     try:
         response = kona_qa({"query": request.question})
@@ -77,7 +91,6 @@ def ask_question(request: QuestionRequest):
             source_info = "\nSource: Unknown"
 
         return {"answer": result, "sources": sources}
-
     except Exception as e:
         # Print error to logs or console for debugging purposes
         print(f"Error: {e}")
@@ -86,5 +99,4 @@ def ask_question(request: QuestionRequest):
 # Run the server
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+    uvicorn.run(app, host="0.0.0.0", port=10000)
