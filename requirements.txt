@@ -4,3 +4,4 @@ transformers
 langchain
 sentence-transformers
 torch
+pypdf
